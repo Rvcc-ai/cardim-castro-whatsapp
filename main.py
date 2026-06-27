@@ -3,6 +3,8 @@ import json
 import logging
 import hashlib
 import hmac
+import smtplib
+from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -23,6 +25,9 @@ WHATSAPP_TOKEN     = os.environ["WHATSAPP_ACCESS_TOKEN"]
 PHONE_NUMBER_ID    = os.environ["WHATSAPP_PHONE_NUMBER_ID"]
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 APP_SECRET         = os.environ.get("WHATSAPP_APP_SECRET", "")
+ATTORNEY_PHONE     = os.environ.get("ATTORNEY_PHONE", "")
+EMAIL_DESTINO      = os.environ.get("EMAIL_DESTINO", "")
+EMAIL_SENHA        = os.environ.get("EMAIL_SENHA", "")
 
 SYSTEM_PROMPT = Path("sistema.txt").read_text(encoding="utf-8")
 
@@ -140,6 +145,7 @@ async def receber_mensagem(request: Request):
     registros[remetente].append({"role": "assistant", "content": texto_resposta, "time": datetime.now().strftime("%d/%m/%Y %H:%M:%S")})
 
     await enviar_mensagem(remetente, texto_resposta)
+    await notificar_advogado(remetente, texto, texto_resposta)
     return {"status": "ok"}
 
 
@@ -160,6 +166,37 @@ async def enviar_mensagem(destinatario: str, texto: str):
         r = await client.post(url, json=payload, headers=headers)
         if r.status_code != 200:
             log.error(f"Erro ao enviar mensagem: {r.status_code} {r.text}")
+
+
+# ── Notificação ao advogado ───────────────────────────────────────────────────
+async def notificar_advogado(remetente: str, msg_cliente: str, resposta: str):
+    if ATTORNEY_PHONE:
+        texto = (
+            f"⚖️ *Cardim & Castro — Novo atendimento*\n\n"
+            f"📱 Cliente: +{remetente}\n\n"
+            f"💬 Mensagem: {msg_cliente[:300]}\n\n"
+            f"🤖 Cristina respondeu:\n{resposta[:300]}"
+        )
+        await enviar_mensagem(ATTORNEY_PHONE, texto)
+
+    if EMAIL_DESTINO and EMAIL_SENHA:
+        try:
+            corpo = (
+                f"Novo atendimento — Cristina IA\n\n"
+                f"Cliente: +{remetente}\n\n"
+                f"Mensagem do cliente:\n{msg_cliente}\n\n"
+                f"Resposta da Cristina:\n{resposta}\n\n"
+                f"---\nPainel completo: https://web-production-3c442.up.railway.app/conversas"
+            )
+            msg = MIMEText(corpo, "plain", "utf-8")
+            msg["Subject"] = f"Cristina — Novo atendimento de +{remetente}"
+            msg["From"] = EMAIL_DESTINO
+            msg["To"] = EMAIL_DESTINO
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as smtp:
+                smtp.login(EMAIL_DESTINO, EMAIL_SENHA)
+                smtp.send_message(msg)
+        except Exception as e:
+            log.error(f"Erro ao enviar e-mail: {e}")
 
 
 # ── Painel de conversas ───────────────────────────────────────────────────────
