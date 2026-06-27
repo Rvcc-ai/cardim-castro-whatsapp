@@ -4,9 +4,10 @@ import logging
 import hashlib
 import hmac
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 import anthropic
 import httpx
 
@@ -27,6 +28,9 @@ SYSTEM_PROMPT = Path("sistema.txt").read_text(encoding="utf-8")
 
 # Histórico de conversa por número (em memória — reinicia com o servidor)
 historico: dict[str, list[dict]] = {}
+
+# Registro completo com timestamps para o painel de conversas
+registros: dict[str, list[dict]] = {}
 
 # IDs de mensagens já processadas (evita duplicatas do webhook)
 mensagens_processadas: set[str] = set()
@@ -57,7 +61,7 @@ async def receber_mensagem(request: Request):
         body = await request.body()
         expected = "sha256=" + hmac.new(
             APP_SECRET.encode(), body, hashlib.sha256
-        ).hexdigest()
+        ).hexdigest()  # type: ignore[attr-defined]
         if not hmac.compare_digest(signature, expected):
             raise HTTPException(status_code=403, detail="Assinatura inválida.")
     else:
@@ -102,11 +106,18 @@ async def receber_mensagem(request: Request):
 
     log.info(f"Mensagem de {remetente}: {texto[:80]}")
 
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
     # Montar histórico (máximo 10 turnos)
     if remetente not in historico:
         historico[remetente] = []
     historico[remetente].append({"role": "user", "content": texto})
     historico[remetente] = historico[remetente][-10:]
+
+    # Registrar para o painel
+    if remetente not in registros:
+        registros[remetente] = []
+    registros[remetente].append({"role": "user", "content": texto, "time": agora})
 
     # Chamar Claude (agente Cristina)
     try:
@@ -126,6 +137,7 @@ async def receber_mensagem(request: Request):
         )
 
     historico[remetente].append({"role": "assistant", "content": texto_resposta})
+    registros[remetente].append({"role": "assistant", "content": texto_resposta, "time": datetime.now().strftime("%d/%m/%Y %H:%M:%S")})
 
     await enviar_mensagem(remetente, texto_resposta)
     return {"status": "ok"}
@@ -148,6 +160,62 @@ async def enviar_mensagem(destinatario: str, texto: str):
         r = await client.post(url, json=payload, headers=headers)
         if r.status_code != 200:
             log.error(f"Erro ao enviar mensagem: {r.status_code} {r.text}")
+
+
+# ── Painel de conversas ───────────────────────────────────────────────────────
+@app.get("/conversas", response_class=HTMLResponse)
+def ver_conversas():
+    total = sum(len(v) for v in registros.values())
+    cards = ""
+    for numero, msgs in sorted(registros.items(), key=lambda x: x[1][-1]["time"] if x[1] else "", reverse=True):
+        bubbles = ""
+        for m in msgs:
+            lado = "cliente" if m["role"] == "user" else "cristina"
+            nome = f"📱 {numero}" if m["role"] == "user" else "🤖 Cristina"
+            cor  = "#e8f5e9" if m["role"] == "assistant" else "#e3f2fd"
+            alinha = "flex-end" if m["role"] == "assistant" else "flex-start"
+            texto_esc = m["content"].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
+            bubbles += f"""
+            <div style="display:flex;flex-direction:column;align-items:{alinha};margin:6px 0">
+              <div style="font-size:11px;color:#888;margin-bottom:2px">{nome} &bull; {m['time']}</div>
+              <div style="background:{cor};border-radius:12px;padding:10px 14px;max-width:75%;font-size:14px;line-height:1.5">{texto_esc}</div>
+            </div>"""
+        ultimo = msgs[-1]["time"] if msgs else ""
+        cards += f"""
+        <div style="background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:24px;overflow:hidden">
+          <div style="background:#1a1a2e;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:600">📞 +{numero}</span>
+            <span style="font-size:12px;opacity:0.7">Último: {ultimo} &bull; {len(msgs)} mensagens</span>
+          </div>
+          <div style="padding:16px 20px;max-height:400px;overflow-y:auto">{bubbles}</div>
+        </div>"""
+
+    if not cards:
+        cards = '<div style="text-align:center;color:#aaa;padding:60px">Nenhuma conversa ainda. Aguardando mensagens dos clientes.</div>'
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cristina — Painel de Conversas</title>
+  <meta http-equiv="refresh" content="30">
+  <style>body{{margin:0;font-family:'Segoe UI',sans-serif;background:#f0f2f5}}header{{background:#1a1a2e;color:#fff;padding:20px 32px;display:flex;justify-content:space-between;align-items:center}}main{{max-width:900px;margin:32px auto;padding:0 16px}}</style>
+</head>
+<body>
+  <header>
+    <div>
+      <div style="font-size:20px;font-weight:700">⚖️ Cardim &amp; Castro Advocacia</div>
+      <div style="font-size:13px;opacity:0.7;margin-top:4px">Painel de Atendimento — Cristina IA</div>
+    </div>
+    <div style="text-align:right;font-size:13px;opacity:0.8">
+      {len(registros)} conversa(s) &bull; {total} mensagens<br>
+      <span style="font-size:11px">Atualiza a cada 30s</span>
+    </div>
+  </header>
+  <main>{cards}</main>
+</body>
+</html>"""
 
 
 # ── Health check ─────────────────────────────────────────────────────────────
